@@ -4,10 +4,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"strconv"
+	"time"
 
 	"github.com/mhsanaei/3x-ui/v2/database/model"
 	"github.com/mhsanaei/3x-ui/v2/web/service"
 	"github.com/mhsanaei/3x-ui/v2/web/session"
+	"github.com/mhsanaei/3x-ui/v2/web/websocket"
 
 	"github.com/gin-gonic/gin"
 )
@@ -25,6 +27,34 @@ func NewInboundController(g *gin.RouterGroup) *InboundController {
 	return a
 }
 
+// broadcastInboundsUpdateClientLimit is the threshold past which we skip the
+// full-list push over WebSocket and signal the frontend to re-fetch via REST.
+// Mirrors the same heuristic used by the periodic traffic job.
+const broadcastInboundsUpdateClientLimit = 5000
+
+// broadcastInboundsUpdate fetches and broadcasts the inbound list for userId.
+// At scale (10k+ clients) the marshaled JSON exceeds the WS payload ceiling,
+// so we send an invalidate signal instead — frontend re-fetches via REST.
+// Skipped entirely when no WebSocket clients are connected.
+func (a *InboundController) broadcastInboundsUpdate(userId int) {
+	if !websocket.HasClients() {
+		return
+	}
+	inbounds, err := a.inboundService.GetInbounds(userId)
+	if err != nil {
+		return
+	}
+	totalClients := 0
+	for _, ib := range inbounds {
+		totalClients += len(ib.ClientStats)
+	}
+	if totalClients > broadcastInboundsUpdateClientLimit {
+		websocket.BroadcastInvalidate(websocket.MessageTypeInbounds)
+		return
+	}
+	websocket.BroadcastInbounds(inbounds)
+}
+
 // initRouter initializes the routes for inbound-related operations.
 func (a *InboundController) initRouter(g *gin.RouterGroup) {
 
@@ -36,9 +66,11 @@ func (a *InboundController) initRouter(g *gin.RouterGroup) {
 	g.POST("/add", a.addInbound)
 	g.POST("/del/:id", a.delInbound)
 	g.POST("/update/:id", a.updateInbound)
+	g.POST("/setEnable/:id", a.setInboundEnable)
 	g.POST("/clientIps/:email", a.getClientIps)
 	g.POST("/clearClientIps/:email", a.clearClientIps)
 	g.POST("/addClient", a.addInboundClient)
+	g.POST("/:id/copyClients", a.copyInboundClients)
 	g.POST("/:id/delClient/:clientId", a.delInboundClient)
 	g.POST("/updateClient/:clientId", a.updateInboundClient)
 	g.POST("/:id/resetClientTraffic/:email", a.resetClientTraffic)
@@ -50,6 +82,12 @@ func (a *InboundController) initRouter(g *gin.RouterGroup) {
 	g.POST("/lastOnline", a.lastOnline)
 	g.POST("/updateClientTraffic/:email", a.updateClientTraffic)
 	g.POST("/:id/delClientByEmail/:email", a.delInboundClientByEmail)
+}
+
+type CopyInboundClientsRequest struct {
+	SourceInboundID int      `form:"sourceInboundId" json:"sourceInboundId"`
+	ClientEmails    []string `form:"clientEmails" json:"clientEmails"`
+	Flow            string   `form:"flow" json:"flow"`
 }
 
 // getInbounds retrieves the list of inbounds for the logged-in user.
@@ -125,6 +163,7 @@ func (a *InboundController) addInbound(c *gin.Context) {
 	if needRestart {
 		a.xrayService.SetToNeedRestart()
 	}
+	a.broadcastInboundsUpdate(user.Id)
 }
 
 // delInbound deletes an inbound configuration by its ID.
@@ -143,6 +182,8 @@ func (a *InboundController) delInbound(c *gin.Context) {
 	if needRestart {
 		a.xrayService.SetToNeedRestart()
 	}
+	user := session.GetLoginUser(c)
+	a.broadcastInboundsUpdate(user.Id)
 }
 
 // updateInbound updates an existing inbound configuration.
@@ -169,6 +210,43 @@ func (a *InboundController) updateInbound(c *gin.Context) {
 	if needRestart {
 		a.xrayService.SetToNeedRestart()
 	}
+	user := session.GetLoginUser(c)
+	a.broadcastInboundsUpdate(user.Id)
+}
+
+// setInboundEnable flips only the enable flag of an inbound. This is a
+// dedicated endpoint because the regular update path serialises the entire
+// settings JSON (every client) — far too heavy for an interactive switch
+// on inbounds with thousands of clients. Frontend optimistically updates
+// the UI; we just persist + sync xray + nudge other open admin sessions.
+func (a *InboundController) setInboundEnable(c *gin.Context) {
+	id, err := strconv.Atoi(c.Param("id"))
+	if err != nil {
+		jsonMsg(c, I18nWeb(c, "pages.inbounds.toasts.inboundUpdateSuccess"), err)
+		return
+	}
+	type form struct {
+		Enable bool `json:"enable" form:"enable"`
+	}
+	var f form
+	if err := c.ShouldBind(&f); err != nil {
+		jsonMsg(c, I18nWeb(c, "somethingWentWrong"), err)
+		return
+	}
+	needRestart, err := a.inboundService.SetInboundEnable(id, f.Enable)
+	if err != nil {
+		jsonMsg(c, I18nWeb(c, "somethingWentWrong"), err)
+		return
+	}
+	jsonMsg(c, I18nWeb(c, "pages.inbounds.toasts.inboundUpdateSuccess"), nil)
+	if needRestart {
+		a.xrayService.SetToNeedRestart()
+	}
+	// Cross-admin sync: lightweight invalidate signal (a few hundred bytes)
+	// instead of fetching + serialising the whole inbound list. Other open
+	// sessions re-fetch via REST. The toggling admin's own UI already
+	// updated optimistically.
+	websocket.BroadcastInvalidate(websocket.MessageTypeInbounds)
 }
 
 // getClientIps retrieves the IP addresses associated with a client by email.
@@ -181,6 +259,37 @@ func (a *InboundController) getClientIps(c *gin.Context) {
 		return
 	}
 
+	// Prefer returning a normalized string list for consistent UI rendering
+	type ipWithTimestamp struct {
+		IP        string `json:"ip"`
+		Timestamp int64  `json:"timestamp"`
+	}
+
+	var ipsWithTime []ipWithTimestamp
+	if err := json.Unmarshal([]byte(ips), &ipsWithTime); err == nil && len(ipsWithTime) > 0 {
+		formatted := make([]string, 0, len(ipsWithTime))
+		for _, item := range ipsWithTime {
+			if item.IP == "" {
+				continue
+			}
+			if item.Timestamp > 0 {
+				ts := time.Unix(item.Timestamp, 0).Local().Format("2006-01-02 15:04:05")
+				formatted = append(formatted, fmt.Sprintf("%s (%s)", item.IP, ts))
+				continue
+			}
+			formatted = append(formatted, item.IP)
+		}
+		jsonObj(c, formatted, nil)
+		return
+	}
+
+	var oldIps []string
+	if err := json.Unmarshal([]byte(ips), &oldIps); err == nil && len(oldIps) > 0 {
+		jsonObj(c, oldIps, nil)
+		return
+	}
+
+	// If parsing fails, return as string
 	jsonObj(c, ips, nil)
 }
 
@@ -211,6 +320,36 @@ func (a *InboundController) addInboundClient(c *gin.Context) {
 		return
 	}
 	jsonMsg(c, I18nWeb(c, "pages.inbounds.toasts.inboundClientAddSuccess"), nil)
+	if needRestart {
+		a.xrayService.SetToNeedRestart()
+	}
+}
+
+// copyInboundClients copies clients from source inbound to target inbound.
+func (a *InboundController) copyInboundClients(c *gin.Context) {
+	targetID, err := strconv.Atoi(c.Param("id"))
+	if err != nil {
+		jsonMsg(c, I18nWeb(c, "somethingWentWrong"), err)
+		return
+	}
+
+	req := &CopyInboundClientsRequest{}
+	err = c.ShouldBind(req)
+	if err != nil {
+		jsonMsg(c, I18nWeb(c, "somethingWentWrong"), err)
+		return
+	}
+	if req.SourceInboundID <= 0 {
+		jsonMsg(c, I18nWeb(c, "somethingWentWrong"), fmt.Errorf("invalid source inbound id"))
+		return
+	}
+
+	result, needRestart, err := a.inboundService.CopyInboundClients(targetID, req.SourceInboundID, req.ClientEmails, req.Flow)
+	if err != nil {
+		jsonMsg(c, I18nWeb(c, "somethingWentWrong"), err)
+		return
+	}
+	jsonObj(c, result, nil)
 	if needRestart {
 		a.xrayService.SetToNeedRestart()
 	}

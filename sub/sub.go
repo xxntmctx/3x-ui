@@ -91,8 +91,17 @@ func (s *Server) initRouter() (*gin.Engine, error) {
 		return nil, err
 	}
 
-	// Determine if JSON subscription endpoint is enabled
+	ClashPath, err := s.settingService.GetSubClashPath()
+	if err != nil {
+		return nil, err
+	}
+
 	subJsonEnable, err := s.settingService.GetSubJsonEnable()
+	if err != nil {
+		return nil, err
+	}
+
+	subClashEnable, err := s.settingService.GetSubClashEnable()
 	if err != nil {
 		return nil, err
 	}
@@ -151,6 +160,31 @@ func (s *Server) initRouter() (*gin.Engine, error) {
 	SubTitle, err := s.settingService.GetSubTitle()
 	if err != nil {
 		SubTitle = ""
+	}
+
+	SubSupportUrl, err := s.settingService.GetSubSupportUrl()
+	if err != nil {
+		SubSupportUrl = ""
+	}
+
+	SubProfileUrl, err := s.settingService.GetSubProfileUrl()
+	if err != nil {
+		SubProfileUrl = ""
+	}
+
+	SubAnnounce, err := s.settingService.GetSubAnnounce()
+	if err != nil {
+		SubAnnounce = ""
+	}
+
+	SubEnableRouting, err := s.settingService.GetSubEnableRouting()
+	if err != nil {
+		return nil, err
+	}
+
+	SubRoutingRules, err := s.settingService.GetSubRoutingRules()
+	if err != nil {
+		SubRoutingRules = ""
 	}
 
 	// set per-request localizer from headers/cookies
@@ -230,8 +264,9 @@ func (s *Server) initRouter() (*gin.Engine, error) {
 	g := engine.Group("/")
 
 	s.sub = NewSUBController(
-		g, LinksPath, JsonPath, subJsonEnable, Encrypt, ShowInfo, RemarkModel, SubUpdates,
-		SubJsonFragment, SubJsonNoises, SubJsonMux, SubJsonRules, SubTitle)
+		g, LinksPath, JsonPath, ClashPath, subJsonEnable, subClashEnable, Encrypt, ShowInfo, RemarkModel, SubUpdates,
+		SubJsonFragment, SubJsonNoises, SubJsonMux, SubJsonRules, SubTitle, SubSupportUrl,
+		SubProfileUrl, SubAnnounce, SubEnableRouting, SubRoutingRules)
 
 	return engine, nil
 }

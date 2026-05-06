@@ -142,7 +142,7 @@ class RandomUtil {
         let length = 32;
 
         if ([SSMethods.BLAKE3_AES_128_GCM].includes(method)) {
-            length = 16; 
+            length = 16;
         }
 
         const array = new Uint8Array(length);
@@ -152,30 +152,36 @@ class RandomUtil {
         return Base64.alternativeEncode(String.fromCharCode(...array));
     }
 
+    static randomBase64(length = 16) {
+        const array = new Uint8Array(length);
+        window.crypto.getRandomValues(array);
+        return Base64.alternativeEncode(String.fromCharCode(...array));
+    }
+
     static randomBase32String(length = 16) {
         const array = new Uint8Array(length);
-        
+
         window.crypto.getRandomValues(array);
-        
+
         const base32Chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
         let result = '';
         let bits = 0;
         let buffer = 0;
-        
+
         for (let i = 0; i < array.length; i++) {
             buffer = (buffer << 8) | array[i];
             bits += 8;
-            
+
             while (bits >= 5) {
                 bits -= 5;
                 result += base32Chars[(buffer >>> bits) & 0x1F];
             }
         }
-        
+
         if (bits > 0) {
             result += base32Chars[(buffer << (5 - bits)) & 0x1F];
         }
-        
+
         return result;
     }
 }
@@ -651,10 +657,13 @@ class CookieManager {
     }
 
     static setCookie(cname, cvalue, exdays) {
-        const d = new Date();
-        d.setTime(d.getTime() + exdays * 24 * 60 * 60 * 1000);
-        let expires = 'expires=' + d.toUTCString();
-        document.cookie = cname + '=' + encodeURIComponent(cvalue) + ';' + expires + ';path=/';
+        let expires = '';
+        if (exdays) {
+            const d = new Date();
+            d.setTime(d.getTime() + exdays * 24 * 60 * 60 * 1000);
+            expires = 'expires=' + d.toUTCString() + ';';
+        }
+        document.cookie = cname + '=' + encodeURIComponent(cvalue) + ';' + expires + 'path=/';
     }
 }
 
@@ -813,13 +822,13 @@ class LanguageManager {
                 });
 
                 if (LanguageManager.isSupportLanguage(lang)) {
-                    CookieManager.setCookie("lang", lang, 150);
+                    CookieManager.setCookie("lang", lang);
                 } else {
-                    CookieManager.setCookie("lang", "en-US", 150);
+                    CookieManager.setCookie("lang", "en-US");
                     window.location.reload();
                 }
             } else {
-                CookieManager.setCookie("lang", "en-US", 150);
+                CookieManager.setCookie("lang", "en-US");
                 window.location.reload();
             }
         }
@@ -832,7 +841,7 @@ class LanguageManager {
             language = "en-US";
         }
 
-        CookieManager.setCookie("lang", language, 150);
+        CookieManager.setCookie("lang", language);
         window.location.reload();
     }
 
@@ -908,7 +917,10 @@ class IntlUtil {
         const language = LanguageManager.getLanguage()
         const now = new Date()
 
-        const diff = Math.round((date - now) / (1000 * 60 * 60 * 24))
+        // Handle delayed start (negative expiryTime values)
+        const diff = date < 0
+            ? Math.round(date / (1000 * 60 * 60 * 24))
+            : Math.round((date - now) / (1000 * 60 * 60 * 24))
         const formatter = new Intl.RelativeTimeFormat(language, { numeric: 'auto' })
 
         return formatter.format(diff, 'day');

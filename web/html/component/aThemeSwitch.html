@@ -24,9 +24,11 @@
 
 {{define "component/themeSwitchTemplateLogin"}}
 <template>
-  <a-space @mousedown="themeSwitcher.animationsOff()" id="change-theme" direction="vertical" :size="10" :style="{ width: '100%' }">
+  <a-space @mousedown="themeSwitcher.animationsOff()" id="change-theme" direction="vertical" :size="10"
+    :style="{ width: '100%' }">
     <a-space direction="horizontal" size="small">
-      <a-switch size="small" :default-checked="themeSwitcher.isDarkTheme" @change="themeSwitcher.toggleTheme()"></a-switch>
+      <a-switch size="small" :default-checked="themeSwitcher.isDarkTheme"
+        @change="themeSwitcher.toggleTheme()"></a-switch>
       <span>{{ i18n "menu.dark" }}</span>
     </a-space>
     <a-space v-if="themeSwitcher.isDarkTheme" direction="horizontal" size="small">
@@ -40,7 +42,8 @@
 {{define "component/aThemeSwitch"}}
 <script>
   function createThemeSwitcher() {
-    const isDarkTheme = localStorage.getItem('dark-mode') === 'true';
+    const darkModePreference = localStorage.getItem('dark-mode');
+    const isDarkTheme = darkModePreference === null ? true : darkModePreference === 'true';
     const isUltra = localStorage.getItem('isUltraDarkThemeEnabled') === 'true';
     if (isUltra) {
       document.documentElement.setAttribute('data-theme', 'ultra-dark');
@@ -92,7 +95,7 @@
   }
   const themeSwitcher = createThemeSwitcher();
   Vue.component('a-theme-switch', {
-    template: `{{template "component/themeSwitchTemplate"}}`,
+    template: `{{template "component/themeSwitchTemplate" .}}`,
     data: () => ({
       themeSwitcher
     }),
@@ -104,7 +107,7 @@
     }
   });
   Vue.component('a-theme-switch-login', {
-    template: `{{template "component/themeSwitchTemplateLogin"}}`,
+    template: `{{template "component/themeSwitchTemplateLogin" .}}`,
     data: () => ({
       themeSwitcher
     }),

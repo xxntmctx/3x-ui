@@ -9,6 +9,7 @@ import (
 
 	"github.com/mhsanaei/3x-ui/v2/web/global"
 	"github.com/mhsanaei/3x-ui/v2/web/service"
+	"github.com/mhsanaei/3x-ui/v2/web/websocket"
 
 	"github.com/gin-gonic/gin"
 )
@@ -21,6 +22,7 @@ type ServerController struct {
 
 	serverService  service.ServerService
 	settingService service.SettingService
+	panelService   service.PanelService
 
 	lastStatus *service.Status
 
@@ -42,6 +44,7 @@ func (a *ServerController) initRouter(g *gin.RouterGroup) {
 	g.GET("/status", a.status)
 	g.GET("/cpuHistory/:bucket", a.getCpuHistoryBucket)
 	g.GET("/getXrayVersion", a.getXrayVersion)
+	g.GET("/getPanelUpdateInfo", a.getPanelUpdateInfo)
 	g.GET("/getConfigJson", a.getConfigJson)
 	g.GET("/getDb", a.getDb)
 	g.GET("/getNewUUID", a.getNewUUID)
@@ -53,6 +56,7 @@ func (a *ServerController) initRouter(g *gin.RouterGroup) {
 	g.POST("/stopXrayService", a.stopXrayService)
 	g.POST("/restartXrayService", a.restartXrayService)
 	g.POST("/installXray/:version", a.installXray)
+	g.POST("/updatePanel", a.updatePanel)
 	g.POST("/updateGeofile", a.updateGeofile)
 	g.POST("/updateGeofile/:fileName", a.updateGeofile)
 	g.POST("/logs/:count", a.getLogs)
@@ -67,6 +71,8 @@ func (a *ServerController) refreshStatus() {
 	// collect cpu history when status is fresh
 	if a.lastStatus != nil {
 		a.serverService.AppendCpuSample(time.Now(), a.lastStatus.Cpu)
+		// Broadcast status update via WebSocket
+		websocket.BroadcastStatus(a.lastStatus)
 	}
 }
 
@@ -128,11 +134,27 @@ func (a *ServerController) getXrayVersion(c *gin.Context) {
 	jsonObj(c, versions, nil)
 }
 
+// getPanelUpdateInfo retrieves the current and latest panel version.
+func (a *ServerController) getPanelUpdateInfo(c *gin.Context) {
+	info, err := a.panelService.GetUpdateInfo()
+	if err != nil {
+		jsonMsg(c, I18nWeb(c, "pages.index.panelUpdateCheckPopover"), err)
+		return
+	}
+	jsonObj(c, info, nil)
+}
+
 // installXray installs or updates Xray to the specified version.
 func (a *ServerController) installXray(c *gin.Context) {
 	version := c.Param("version")
 	err := a.serverService.UpdateXray(version)
 	jsonMsg(c, I18nWeb(c, "pages.index.xraySwitchVersionPopover"), err)
+}
+
+// updatePanel starts a panel self-update to the latest release.
+func (a *ServerController) updatePanel(c *gin.Context) {
+	err := a.panelService.StartUpdate()
+	jsonMsg(c, I18nWeb(c, "pages.index.panelUpdateStartedPopover"), err)
 }
 
 // updateGeofile updates the specified geo file for Xray.
@@ -155,9 +177,16 @@ func (a *ServerController) stopXrayService(c *gin.Context) {
 	err := a.serverService.StopXrayService()
 	if err != nil {
 		jsonMsg(c, I18nWeb(c, "pages.xray.stopError"), err)
+		websocket.BroadcastXrayState("error", err.Error())
 		return
 	}
 	jsonMsg(c, I18nWeb(c, "pages.xray.stopSuccess"), err)
+	websocket.BroadcastXrayState("stop", "")
+	websocket.BroadcastNotification(
+		I18nWeb(c, "pages.xray.stopSuccess"),
+		"Xray service has been stopped",
+		"warning",
+	)
 }
 
 // restartXrayService restarts the Xray service.
@@ -165,9 +194,16 @@ func (a *ServerController) restartXrayService(c *gin.Context) {
 	err := a.serverService.RestartXrayService()
 	if err != nil {
 		jsonMsg(c, I18nWeb(c, "pages.xray.restartError"), err)
+		websocket.BroadcastXrayState("error", err.Error())
 		return
 	}
 	jsonMsg(c, I18nWeb(c, "pages.xray.restartSuccess"), err)
+	websocket.BroadcastXrayState("running", "")
+	websocket.BroadcastNotification(
+		I18nWeb(c, "pages.xray.restartSuccess"),
+		"Xray service has been restarted successfully",
+		"success",
+	)
 }
 
 // getLogs retrieves the application logs based on count, level, and syslog filters.
@@ -193,10 +229,10 @@ func (a *ServerController) getXrayLogs(c *gin.Context) {
 	//getting tags for freedom and blackhole outbounds
 	config, err := a.settingService.GetDefaultXrayConfig()
 	if err == nil && config != nil {
-		if cfgMap, ok := config.(map[string]interface{}); ok {
-			if outbounds, ok := cfgMap["outbounds"].([]interface{}); ok {
+		if cfgMap, ok := config.(map[string]any); ok {
+			if outbounds, ok := cfgMap["outbounds"].([]any); ok {
 				for _, outbound := range outbounds {
-					if obMap, ok := outbound.(map[string]interface{}); ok {
+					if obMap, ok := outbound.(map[string]any); ok {
 						switch obMap["protocol"] {
 						case "freedom":
 							if tag, ok := obMap["tag"].(string); ok {
